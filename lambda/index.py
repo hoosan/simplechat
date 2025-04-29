@@ -4,7 +4,7 @@ import os
 import boto3
 import re  # 正規表現モジュールをインポート
 from botocore.exceptions import ClientError
-
+from urllib import request as urllib_request, error as urllib_error 
 
 # Lambda コンテキストからリージョンを抽出する関数
 def extract_region_from_arn(arn):
@@ -19,6 +19,88 @@ bedrock_client = None
 
 # モデルID
 MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-lite-v1:0")
+
+FASTAPI_URL = os.environ.get("FASTAPI_URL", "http://localhost:8000")
+
+def lambda_fastapi_handler(event, context):
+    try:
+        body = json.loads(event['body'])
+        message = body['message']
+        conversation_history = body.get('conversationHistory', [])
+
+        url = FASTAPI_URL.rstrip('/') + '/generate'
+
+        payload_dict = {
+            "prompt": message,
+            "max_new_tokens": 512,
+            "do_sample": True,
+            "temperature": 0.7,
+            "top_p": 0.9
+        }
+        payload = json.dumps(payload_dict).encode('utf-8')
+
+        req = urllib_request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json"
+            },
+            method="POST"
+        )
+
+        try:
+            with urllib_request.urlopen(req) as resp:
+                resp_body = resp.read().decode("utf-8")
+                api_result = json.loads(resp_body)
+        except urllib_error.HTTPError as e:
+            print(f"Error: {e.code} {e.reason}")
+            raise
+
+        if 'generated_text' not in api_result or 'response_time' not in api_result:
+            raise Exception(f"Unexpected response from FastAPI: {api_result}")
+
+        assistant_response = api_result['generated_text']
+        response_time      = api_result['response_time']
+
+        updated_history = conversation_history.copy()
+        updated_history.append({
+            "role": "assistant",
+            "content": assistant_response
+        })
+
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+                "Access-Control-Allow-Methods": "OPTIONS,POST"
+            },
+            "body": json.dumps({
+                "success": True,
+                "response": assistant_response,
+                "response_time": response_time,
+                "conversationHistory": updated_history
+            })
+        }
+    
+    except Exception as error:
+        print("Error:", str(error))
+        
+        return {
+            "statusCode": 500,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token",
+                "Access-Control-Allow-Methods": "OPTIONS,POST"
+            },
+            "body": json.dumps({
+                "success": False,
+                "error": str(error)
+            })
+        }
+
 
 def lambda_handler(event, context):
     try:

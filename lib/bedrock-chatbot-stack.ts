@@ -51,33 +51,41 @@ export class BedrockChatbotStack extends cdk.Stack {
     });
 
     // User Pool Clientの作成
-    const userPoolClient = new cognito.UserPoolClient(this, 'ChatbotUserPoolClient', {
-      userPool,
-      authFlows: {
-        userPassword: true,
-        userSrp: true,
-      },
-      generateSecret: false,
-      oAuth: {
-        flows: {
-          implicitCodeGrant: true,
-          authorizationCodeGrant: true,
+    const userPoolClient = new cognito.UserPoolClient(
+      this,
+      'ChatbotUserPoolClient',
+      {
+        userPool,
+        authFlows: {
+          userPassword: true,
+          userSrp: true,
         },
-        scopes: [cognito.OAuthScope.EMAIL, cognito.OAuthScope.OPENID, cognito.OAuthScope.PROFILE],
-        callbackUrls: ['http://localhost:3000'],
-      },
-      readAttributes: new cognito.ClientAttributes().withStandardAttributes({
-        email: true,
-        emailVerified: true,
-        phoneNumber: true,
-        fullname: true,
-      }),
-      writeAttributes: new cognito.ClientAttributes().withStandardAttributes({
-        email: true,
-        phoneNumber: true,
-        fullname: true,
-      }),
-    });
+        generateSecret: false,
+        oAuth: {
+          flows: {
+            implicitCodeGrant: true,
+            authorizationCodeGrant: true,
+          },
+          scopes: [
+            cognito.OAuthScope.EMAIL,
+            cognito.OAuthScope.OPENID,
+            cognito.OAuthScope.PROFILE,
+          ],
+          callbackUrls: ['http://localhost:3000'],
+        },
+        readAttributes: new cognito.ClientAttributes().withStandardAttributes({
+          email: true,
+          emailVerified: true,
+          phoneNumber: true,
+          fullname: true,
+        }),
+        writeAttributes: new cognito.ClientAttributes().withStandardAttributes({
+          email: true,
+          phoneNumber: true,
+          fullname: true,
+        }),
+      }
+    );
 
     // S3バケットの作成
     const websiteBucket = new s3.Bucket(this, 'WebsiteBucket', {
@@ -87,10 +95,7 @@ export class BedrockChatbotStack extends cdk.Stack {
       cors: [
         {
           allowedHeaders: ['*'],
-          allowedMethods: [
-            s3.HttpMethods.GET,
-            s3.HttpMethods.HEAD,
-          ],
+          allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.HEAD],
           allowedOrigins: ['*'],
           maxAge: 3000,
         },
@@ -124,8 +129,9 @@ export class BedrockChatbotStack extends cdk.Stack {
 
     // CloudFront URLをユーザープールクライアントのコールバックURLに追加
     userPoolClient.node.addDependency(distribution);
-    
-    const cfnUserPoolClient = userPoolClient.node.defaultChild as cognito.CfnUserPoolClient;
+
+    const cfnUserPoolClient = userPoolClient.node
+      .defaultChild as cognito.CfnUserPoolClient;
     cfnUserPoolClient.callbackUrLs = [
       `https://${distribution.distributionDomainName}`,
       'http://localhost:3000',
@@ -135,34 +141,47 @@ export class BedrockChatbotStack extends cdk.Stack {
     const lambdaRole = new iam.Role(this, 'ChatLambdaRole', {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
-      ]
+        iam.ManagedPolicy.fromAwsManagedPolicyName(
+          'service-role/AWSLambdaBasicExecutionRole'
+        ),
+      ],
     });
 
     // Bedrockへのアクセス権限を追加
-    lambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'bedrock:InvokeModel',
-        'bedrock:InvokeModelWithResponseStream'
-      ],
-      resources: ['*']
-    }));
+    lambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:InvokeModelWithResponseStream',
+        ],
+        resources: ['*'],
+      })
+    );
+
+    const fastApiUrl = this.node.tryGetContext('fastapiUrl');
+    if (!fastApiUrl) {
+      throw new Error(
+        'ERROR: context key "fastapiUrl" が見つかりません。 `cdk deploy -c fastapiUrl=<URL>` で渡してください。'
+      );
+    }
 
     // Lambda function
     const chatFunction = new lambda.Function(this, 'ChatFunction', {
       runtime: lambda.Runtime.PYTHON_3_10,
-      handler: 'index.lambda_handler',
+      handler: 'index.lambda_fastapi_handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
-      timeout: cdk.Duration.seconds(30),
+      timeout: cdk.Duration.seconds(60),
       memorySize: 128,
       role: lambdaRole,
       environment: {
         MODEL_ID: modelId,
+        FASTAPI_URL: fastApiUrl,
       },
     });
 
     // 明示的な依存関係を追加
-    const cfnChatFunction = chatFunction.node.defaultChild as lambda.CfnFunction;
+    const cfnChatFunction = chatFunction.node
+      .defaultChild as lambda.CfnFunction;
     const cfnLambdaRole = lambdaRole.node.defaultChild as iam.CfnRole;
     cfnChatFunction.addDependsOn(cfnLambdaRole);
 
@@ -173,54 +192,71 @@ export class BedrockChatbotStack extends cdk.Stack {
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
         allowMethods: apigateway.Cors.ALL_METHODS,
-        allowHeaders: ['Content-Type', 'X-Amz-Date', 'Authorization', 'X-Api-Key', 'X-Amz-Security-Token'],
+        allowHeaders: [
+          'Content-Type',
+          'X-Amz-Date',
+          'Authorization',
+          'X-Api-Key',
+          'X-Amz-Security-Token',
+        ],
         allowCredentials: true,
       },
     });
 
     // Cognito Authorizer
-    const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'ChatbotAuthorizer', {
-      cognitoUserPools: [userPool],
-    });
+    const authorizer = new apigateway.CognitoUserPoolsAuthorizer(
+      this,
+      'ChatbotAuthorizer',
+      {
+        cognitoUserPools: [userPool],
+      }
+    );
 
     const chatResource = api.root.addResource('chat');
-    chatResource.addMethod('POST', new apigateway.LambdaIntegration(chatFunction), {
-      authorizer,
-      authorizationType: apigateway.AuthorizationType.COGNITO,
-    });
+
+    chatResource.addMethod(
+      'POST',
+      new apigateway.LambdaIntegration(chatFunction),
+      {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
 
     // 設定生成用のLambdaロールを作成
     const configGeneratorRole = new iam.Role(this, 'ConfigGeneratorRole', {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole')
-      ]
+        iam.ManagedPolicy.fromAwsManagedPolicyName(
+          'service-role/AWSLambdaBasicExecutionRole'
+        ),
+      ],
     });
-    
+
     // S3とCloudFrontへのアクセス権限を追加
-    configGeneratorRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        's3:GetObject',
-        's3:PutObject'
-      ],
-      resources: [
-        `${websiteBucket.bucketArn}/*`
-      ]
-    }));
-    
-    configGeneratorRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'cloudfront:CreateInvalidation'
-      ],
-      resources: ['*']
-    }));
-    
+    configGeneratorRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject', 's3:PutObject'],
+        resources: [`${websiteBucket.bucketArn}/*`],
+      })
+    );
+
+    configGeneratorRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['cloudfront:CreateInvalidation'],
+        resources: ['*'],
+      })
+    );
+
     // 設定生成用のLambda関数
-    const configGeneratorFunction = new lambda.Function(this, 'ConfigGeneratorFunction', {
-      runtime: lambda.Runtime.NODEJS_18_X,
-      handler: 'index.handler',
-      role: configGeneratorRole,
-      code: lambda.Code.fromInline(`
+    const configGeneratorFunction = new lambda.Function(
+      this,
+      'ConfigGeneratorFunction',
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        handler: 'index.handler',
+        role: configGeneratorRole,
+        code: lambda.Code.fromInline(`
         // AWS SDK v3 のインポート
         const { S3Client, GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
         const { CloudFrontClient, CreateInvalidationCommand } = require('@aws-sdk/client-cloudfront');
@@ -380,24 +416,26 @@ export class BedrockChatbotStack extends cdk.Stack {
           });
         }
       `),
-      timeout: cdk.Duration.minutes(5),
-      memorySize: 512,
-      environment: {
-        NODE_OPTIONS: '--enable-source-maps',
-      },
-    });
-    
+        timeout: cdk.Duration.minutes(5),
+        memorySize: 512,
+        environment: {
+          NODE_OPTIONS: '--enable-source-maps',
+        },
+      }
+    );
+
     // 明示的な依存関係を追加
-    const cfnConfigFunction = configGeneratorFunction.node.defaultChild as lambda.CfnFunction;
+    const cfnConfigFunction = configGeneratorFunction.node
+      .defaultChild as lambda.CfnFunction;
     const cfnConfigRole = configGeneratorRole.node.defaultChild as iam.CfnRole;
     cfnConfigFunction.addDependsOn(cfnConfigRole);
-    
+
     // カスタムリソースプロバイダー
     const configProvider = new cr.Provider(this, 'ConfigProvider', {
       onEventHandler: configGeneratorFunction,
       logRetention: logs.RetentionDays.ONE_DAY,
     });
-    
+
     // カスタムリソース
     const configResource = new cdk.CustomResource(this, 'ConfigResource', {
       serviceToken: configProvider.serviceToken,
@@ -413,15 +451,21 @@ export class BedrockChatbotStack extends cdk.Stack {
         Timestamp: new Date().toISOString(),
       },
     });
-    
+
     // S3デプロイメントの後に設定を生成するように依存関係を設定
-    const websiteDeployment = new s3deploy.BucketDeployment(this, 'DeployWebsite', {
-      sources: [s3deploy.Source.asset(path.join(__dirname, '../frontend/build'))],
-      destinationBucket: websiteBucket,
-      distribution,
-      distributionPaths: ['/*'],
-    });
-    
+    const websiteDeployment = new s3deploy.BucketDeployment(
+      this,
+      'DeployWebsite',
+      {
+        sources: [
+          s3deploy.Source.asset(path.join(__dirname, '../frontend/build')),
+        ],
+        destinationBucket: websiteBucket,
+        distribution,
+        distributionPaths: ['/*'],
+      }
+    );
+
     // 依存関係を設定
     configResource.node.addDependency(websiteDeployment);
 
